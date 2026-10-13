@@ -1,5 +1,5 @@
 import {firebaseConfig} from './firebase-config.js';
-import {validateData,blankRecord} from './domain.js';
+import {validateData,validateRestore,blankRecord,monthKey} from './domain.js';
 export const configured=!!firebaseConfig;
 let api,auth,db,user,stop=[];
 const root='workspaces/padaria';
@@ -12,7 +12,7 @@ export async function connect({onAuth,onData,onError}){
    stop.forEach(fn=>fn());stop=[];user=u;onAuth(u);
    if(!u)return;
    const state={version:1,hasRealData:false,companies:[],records:{}};const ready=new Set();
-   function emit(k){ready.add(k);if(ready.size===3){try{onData(validateData(structuredClone(state)));}catch(e){onError(e);}}}
+   function emit(k){if(user?.uid!==u.uid)return;ready.add(k);if(ready.size===3){try{onData(validateData(structuredClone(state)));}catch(e){onError(e);}}}
    const error=e=>onError(e);
    stop.push(f.onSnapshot(f.doc(db,root),s=>{state.hasRealData=s.data()?.hasRealData===true;emit('meta');},error));
    stop.push(f.onSnapshot(f.collection(db,root+'/companies'),s=>{state.companies=s.docs.map(d=>d.data());emit('companies');},error));
@@ -44,9 +44,9 @@ export async function addAttachment(companyId,month,file,kind){
 export async function getAttachment(id){requireUser();const s=await api.getDoc(api.doc(db,root+'/attachments/'+id));if(!s.exists())throw Error('Anexo não encontrado.');const d=s.data(),bytes=Uint8Array.from(atob(d.content),c=>c.charCodeAt(0));return {name:d.name,blob:new Blob([bytes],{type:d.mime})};}
 export async function backupAll(state){requireUser();const s=await api.getDocs(api.collection(db,root+'/attachments'));return {...state,hasRealData:true,attachmentFiles:s.docs.map(d=>d.data())};}
 export async function restoreAll(restored){
- requireUser();validateData(restored);if(restored.companies.some(c=>c.fictional||c.id.startsWith('demo-')))throw Error('Backups de demonstração não podem substituir os dados reais.');
+ requireUser();validateRestore(restored);
  const [companies,records,files]=await Promise.all(['companies','records','attachments'].map(k=>api.getDocs(api.collection(db,root+'/'+k))));
- const targets=[...restored.companies.map(c=>['companies',c.id,c]),...Object.entries(restored.records).map(([id,r])=>['records',id,r]),...(restored.attachmentFiles||[]).map(f=>['attachments',f.id,f])];
+ const targets=[...restored.companies.map(c=>['companies',c.id,{...c,startMonth:c.startMonth||Object.keys(restored.records).filter(k=>k.startsWith(c.id+':')).map(k=>k.split(':')[1]).sort()[0]||monthKey()}]),...Object.entries(restored.records).map(([id,r])=>['records',id,r]),...(restored.attachmentFiles||[]).map(f=>['attachments',f.id,{...f,uid:user.uid}])];
  const keys=new Set(targets.map(([kind,id])=>kind+'/'+id));const removals=[...companies.docs.map(d=>['companies',d]),...records.docs.map(d=>['records',d]),...files.docs.map(d=>['attachments',d])].filter(([k,d])=>!keys.has(k+'/'+d.id));
  if(targets.length+removals.length>450)throw Error('Este backup exige uma importação assistida por conter mais de 450 registros.');
  const batch=api.writeBatch(db);for(const [kind,id,v]of targets)batch.set(api.doc(db,root+'/'+kind+'/'+id),v);for(const [,d]of removals)batch.delete(d.ref);batch.set(api.doc(db,root),{hasRealData:true},{merge:true});await batch.commit();

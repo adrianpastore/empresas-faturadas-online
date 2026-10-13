@@ -10,7 +10,7 @@ const badge=(text,color)=>`<span class="badge ${color}">${text}</span>`;
 let toastTimer;function toast(msg){$('#toast').textContent=msg;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4500);}
 function requireReady(){if(!user)throw Error('Entre com sua conta Google para continuar.');if(!ready)throw Error('Aguarde a sincronização do banco.');}
 function rememberReal(){try{localStorage.setItem(KEY+'-real-'+user.uid,'true');}catch{}}
-function acceptData(next){ready=true;const retired=localStorage.getItem(KEY+'-real-'+user.uid)==='true';if(next.hasRealData||next.companies.length)rememberReal();demo=shouldShowDemo(next,retired);data=demo?initialDemo():next;render();$('#sync-status').textContent='● Sincronizado com Firebase';}
+function acceptData(next){ready=true;let retired=false;try{retired=localStorage.getItem(KEY+'-real-'+user.uid)==='true';}catch{}if(next.hasRealData||next.companies.length)rememberReal();demo=shouldShowDemo(next,retired);data=demo?initialDemo():next;render();$('#sync-status').textContent='● Sincronizado com Firebase';}
 const activeCompanies=()=>data.companies.filter(c=>!c.startMonth||c.startMonth<=month);
 function render(){
   $('#month').value=month;
@@ -73,19 +73,20 @@ $('#edit-form').addEventListener('submit',async e=>{
  if(editing.kind==='company'){
    const name=f.get('name').trim();if(!name)throw Error('Informe o nome da empresa.');
    const contacts=f.get('contacts').split('\n').filter(x=>x.trim()).map(line=>{const i=line.lastIndexOf('|');if(i<1)throw Error('Use nome | telefone em cada contato.');let phone=line.slice(i+1).replace(/\D/g,'');if(phone.length===10||phone.length===11)phone='55'+phone;if(phone.length<12||phone.length>15)throw Error('Confira o telefone e inclua o DDD.');return {name:line.slice(0,i).trim(),phone};});
+   if(contacts.length>10)throw Error('Cadastre até 10 contatos por empresa.');
    const existing=next.companies.find(c=>c.id===editing.id);
    const c={...existing,id:editing.id||crypto.randomUUID(),name,method:f.get('method'),dueDay:Number(f.get('dueDay')),contacts,startMonth:existing?.startMonth||month};
    if(existing)next.companies[next.companies.indexOf(existing)]=c;else next.companies.push(c);
-   validateData(next);await cloud.saveEntity('company',c.id,c,editing.base,{month:editing.month});rememberReal();demo=false;
+   validateData(next);await cloud.saveEntity('company',c.id,c,editing.base,{month:editing.month});rememberReal();demo=false;data=retireDemo(data);const i=data.companies.findIndex(x=>x.id===c.id);if(i<0)data.companies.push(c);else data.companies[i]=c;
  }else{
    const launch=f.get('launch'),prior=recordFor(next,editing.id,editing.month);
    if(launch!=='launched'&&prior.launch==='launched'&&!confirm('Isso removerá o valor, pagamento e controles deste mês. Continuar?'))return;
    const r={...blankRecord(),launch,note:f.get('note').trim(),attachments:prior.attachments||[],lastContactAt:prior.lastContactAt||'',lastContactName:prior.lastContactName||''};
    if(launch==='launched'){r.amount=parseMoney(f.get('amount'));r.due=f.get('due');r.invoice=f.get('invoice').trim();r.paid=f.has('paid');r.paidDate=r.paid?(f.get('paidDate')||today()):'';r.receipt=f.get('receipt');r.boleto=f.has('boleto');}
    next.records[`${editing.id}:${editing.month}`]=r;validateData(next);
-   if(!demo)await cloud.saveEntity('record',editing.id+':'+editing.month,r,editing.base,{companyId:editing.id,month:editing.month});
+   if(!demo){await cloud.saveEntity('record',editing.id+':'+editing.month,r,editing.base,{companyId:editing.id,month:editing.month});data={...data,records:{...data.records,[editing.id+':'+editing.month]:r}};}
  }
- data=next;render();$('#editor').close();toast(demo?'Exemplo atualizado; nenhum dado fictício é salvo no banco.':'Salvo e sincronizado.');
+ if(demo)data=next;render();$('#editor').close();toast(demo?'Exemplo atualizado; nenhum dado fictício é salvo no banco.':'Salvo e sincronizado.');
  }catch(err){$('#form-error').textContent=friendly(err);}finally{e.target.querySelector('[type="submit"]').disabled=false;}
 });
 $('#rows').addEventListener('click',e=>{const b=e.target.closest('button[data-action]');if(!b)return;({record:openRecord,company:openCompany,contact:openContact,details:openDetails})[b.dataset.action](b.dataset.id);});
