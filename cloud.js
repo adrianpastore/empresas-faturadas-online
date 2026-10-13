@@ -14,9 +14,11 @@ export async function connect({onAuth,onData,onError}){
    const state={version:1,hasRealData:false,companies:[],records:{}};const ready=new Set();
    function emit(k){if(user?.uid!==u.uid)return;ready.add(k);if(ready.size===3){try{onData(validateData(structuredClone(state)));}catch(e){onError(e);}}}
    const error=e=>onError(e);
-   stop.push(f.onSnapshot(f.doc(db,root),s=>{state.hasRealData=s.data()?.hasRealData===true;emit('meta');},error));
-   stop.push(f.onSnapshot(f.collection(db,root+'/companies'),s=>{state.companies=s.docs.map(d=>d.data());emit('companies');},error));
-   stop.push(f.onSnapshot(f.collection(db,root+'/records'),s=>{state.records=Object.fromEntries(s.docs.map(d=>[d.id,d.data()]));emit('records');},error));
+   // Só mostrar dados após confirmação do servidor, inclusive ao trocar de conta.
+   // O cache em memória do SDK pode conter registros de uma sessão anterior.
+   stop.push(f.onSnapshot(f.doc(db,root),{includeMetadataChanges:true},s=>{if(s.metadata.fromCache)return;state.hasRealData=s.data()?.hasRealData===true;emit('meta');},error));
+   stop.push(f.onSnapshot(f.collection(db,root+'/companies'),{includeMetadataChanges:true},s=>{if(s.metadata.fromCache)return;state.companies=s.docs.map(d=>d.data());emit('companies');},error));
+   stop.push(f.onSnapshot(f.collection(db,root+'/records'),{includeMetadataChanges:true},s=>{if(s.metadata.fromCache)return;state.records=Object.fromEntries(s.docs.map(d=>[d.id,d.data()]));emit('records');},error));
  });
 }
 export async function login(){if(!auth)throw Error('Aguarde a conexão com o Firebase.');const p=new api.GoogleAuthProvider();p.setCustomParameters({prompt:'select_account'});await api.signInWithPopup(auth,p);}
