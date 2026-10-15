@@ -53,3 +53,16 @@ export async function restoreAll(restored){
  if(targets.length+removals.length>450)throw Error('Este backup exige uma importação assistida por conter mais de 450 registros.');
  const batch=api.writeBatch(db);for(const [kind,id,v]of targets)batch.set(api.doc(db,root+'/'+kind+'/'+id),v);for(const [,d]of removals)batch.delete(d.ref);batch.set(api.doc(db,root),{hasRealData:true},{merge:true});await batch.commit();
 }
+export async function importAll(plan){
+ requireUser();
+ const keys=Object.keys(plan.records),ids=[...new Set([...plan.companies.map(c=>c.id),...keys.map(k=>k.slice(0,k.lastIndexOf(':')))])];
+ if(plan.companies.length+keys.length+ids.length+1>450)throw Error('Esta planilha exige uma importação assistida por conter mais de 450 registros.');
+ await api.runTransaction(db,async tx=>{
+   const records=await Promise.all(keys.map(k=>tx.get(api.doc(db,root+'/records/'+k)))),companies=await Promise.all(plan.companies.map(c=>tx.get(api.doc(db,root+'/companies/'+c.id))));
+   if(records.some(s=>s.exists()&&s.data().launch!=='pending'))throw Error('Um dos meses foi lançado em outro aparelho durante a conferência. Abra a planilha novamente.');
+   plan.companies.forEach((c,i)=>{const cur=companies[i].exists()?companies[i].data():null;tx.set(api.doc(db,root+'/companies/'+c.id),cur?{...cur,startMonth:[cur.startMonth,c.startMonth].filter(Boolean).sort()[0]}:c);});
+   keys.forEach((k,i)=>{const prev=records[i].exists()?records[i].data():{},r=plan.records[k];tx.set(api.doc(db,root+'/records/'+k),{...blankRecord(),...prev,launch:'launched',amount:r.amount,paid:r.paid});});
+   for(const id of ids){const n=keys.filter(k=>k.startsWith(id+':')).length;log(tx,'cadastro',id,'',`Importado da planilha: ${n} ${n===1?'mês':'meses'}`);}
+   tx.set(api.doc(db,root),{hasRealData:true},{merge:true});
+ });
+}
