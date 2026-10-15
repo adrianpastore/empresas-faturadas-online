@@ -1,8 +1,9 @@
-import {monthKey,shiftMonth,blankRecord,recordFor,money,parseMoney,summary,validateData,onlyDigits,isValidCnpj,formatCnpj,boletoMessage} from './domain.js';
+import {monthKey,shiftMonth,blankRecord,recordFor,money,parseMoney,summary,validateData,onlyDigits,isValidCnpj,formatCnpj,boletoMessage,gridMonths,applyAmount,togglePaid} from './domain.js';
 import {initialDemo,retireDemo,shouldShowDemo} from './demo.js';
 import * as cloud from './cloud.js';
 import {parseWorkbook} from './xlsx.js';import {planImport} from './importer.js';
 const $=s=>document.querySelector(s), KEY='empresas-faturadas-v1';
+let layout='list';try{if(localStorage.getItem('layout')==='grid')layout='grid';}catch{}
 let data={version:1,hasRealData:false,companies:[],records:{}},month=monthKey(),view='all',editing=null,demo=false,ready=false,user=null,contactCompany=null,importing=null,session=0;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const monthName=k=>new Date(k+'-02T12:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
@@ -48,7 +49,63 @@ function render(){
   if(demo)$('#demo-banner').innerHTML='Empresas e valores fictícios para conhecer o painel. Ao cadastrar sua primeira empresa real, todos os exemplos desaparecem definitivamente. <button class="quiet" id="begin-real">Cadastrar empresa real →</button>';
   $('#begin-real')?.addEventListener('click',()=>openCompany());
   $('#new-company').disabled=!ready;$('#restore').disabled=!ready;$('#import-sheet').disabled=!ready;$('#backup').disabled=!ready||demo;
+  renderGrid(query);
 }
+function setLayout(next){layout=next;try{localStorage.setItem('layout',layout);}catch{}render();}
+document.querySelectorAll('[data-layout]').forEach(b=>b.addEventListener('click',()=>setLayout(b.dataset.layout)));
+let gridEditing=null,gridSpan='';
+function renderGrid(query){
+ const on=layout==='grid'&&!!user,opening=on&&$('#grid').hidden,months=gridMonths(data.companies,data.records),current=monthKey();
+ $('#grid').hidden=!on;$('.panel .table-scroll').hidden=on;$('#filter').hidden=on;$('.table-footer').hidden=on;
+ document.querySelectorAll('[data-layout]').forEach(b=>{b.classList.toggle('active',b.dataset.layout===layout);b.setAttribute('aria-pressed',String(b.dataset.layout===layout));});
+ if(!on){gridEditing=null;$('#grid').innerHTML='';return;}
+ // Não redesenhar com uma célula aberta: um snapshot no meio da digitação apagaria o campo.
+ if(gridEditing)return;
+ const cs=data.companies.filter(c=>[c.name,...c.contacts.map(x=>x.name+' '+x.phone)].join(' ').toLocaleLowerCase('pt-BR').includes(query)).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+ $('#empty').hidden=true;$('#company-count').textContent=`${cs.length} empresas`;
+ const cls=m=>m===current?' current':'';
+ $('#grid').innerHTML=`<table class="grid"><thead><tr><th scope="col">Empresa</th>${months.map(m=>`<th scope="col" class="${cls(m)}"><button data-month="${esc(m)}">${esc(new Date(m+'-02T12:00:00').toLocaleDateString('pt-BR',{month:'short'}).replace('.',''))}/${esc(m.slice(2,4))}</button></th>`).join('')}</tr></thead><tbody>${cs.map(c=>`<tr><th scope="row">${esc(c.name)}${c.method==='boleto'?' 🧾':''}</th>${months.map(m=>{
+  const r=recordFor(data,c.id,m),locked=c.startMonth&&m<c.startMonth,on=r.launch==='launched',state=locked?'locked':on?r.paid?'paid':'open':r.launch;
+  return `<td data-id="${esc(c.id)}" data-month="${esc(m)}" class="${state}${cls(m)}">${locked?'—':`<button class="cell" aria-label="${esc(c.name)} · ${esc(m)}">${on?esc(money(r.amount)):r.launch==='none'?'sem compras':''}</button>${on?'<button class="dot" data-toggle aria-label="Alternar pago">●</button>':''}`}</td>`;
+ }).join('')}</tr>`).join('')}</tbody><tfoot><tr><th scope="row">Total do mês</th>${months.map(m=>`<td class="${cls(m)}">${esc(money(cs.reduce((sum,c)=>{const r=recordFor(data,c.id,m);return sum+(r.launch==='launched'?r.amount:0);},0)))}</td>`).join('')}</tr></tfoot></table>`;
+ // Centralizar o mês atual ao abrir e quando chegam meses novos (os dados carregam depois da primeira tela).
+ const span=months[0]+'/'+months.length;if(opening||span!==gridSpan){gridSpan=span;const g=$('#grid'),th=g.querySelector('th.current');if(th){const fixed=g.querySelector('th')?.offsetWidth||0;g.scrollLeft+=th.getBoundingClientRect().left-g.getBoundingClientRect().left-fixed-Math.max(0,(g.clientWidth-fixed-th.offsetWidth)/2);}}
+}
+const amountText=r=>r.launch==='launched'?(r.amount/100).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}):r.launch==='none'?'0':'';
+function gridTarget(td,dir){
+ const row=td.parentNode,cells=[...row.querySelectorAll('td')],i=cells.indexOf(td);
+ return dir==='down'?row.nextElementSibling?.querySelectorAll('td')[i]:cells[i+dir];
+}
+function findCell(id,m){return [...$('#grid').querySelectorAll('td[data-id]')].find(td=>td.dataset.id===id&&td.dataset.month===m);}
+async function saveCell(td,next,base){
+ const {id,month:m}=td.dataset,key=id+':'+m,current=session;td.textContent='salvando…';
+ try{requireReady();if(!demo)await cloud.saveEntity('record',key,next,base,{companyId:id,month:m});if(current!==session)return false;data.records[key]=next;render();toast(demo?'Exemplo atualizado; nenhum dado fictício é salvo no banco.':'Salvo e sincronizado.');return true;}
+ catch(e){if(current===session){render();toast(friendly(e));}return false;}
+}
+function editCell(td){
+ if(!td?.querySelector('.cell')||!ready)return;
+ const {id,month:m}=td.dataset,c=data.companies.find(c=>c.id===id),base=structuredClone(data.records[id+':'+m]||null),r=base||blankRecord(),value=amountText(r);
+ td.innerHTML=`<input inputmode="decimal" aria-label="Valor de ${esc(c.name)} em ${esc(m)}">`;const input=td.querySelector('input');input.value=value;input.focus();input.select();let done=false;
+ async function finish(dir){
+  if(done||gridEditing?.input!==input)return false;done=true;gridEditing=null;const target=dir===undefined?null:gridTarget(td,dir),dest=target?{...target.dataset}:null;
+  try{
+   if(input.value!==value){const next=applyAmount(r,input.value,c,m);if(r.launch==='launched'&&next.launch!=='launched'&&!confirm('Isso removerá o valor, pagamento e controles deste mês. Continuar?')){render();return false;}if(!await saveCell(td,next,base))return false;}else render();
+   if(dest)editCell(findCell(dest.id,dest.month));return true;
+  }catch(e){render();toast(friendly(e));return false;}
+ }
+ gridEditing={input,finish};
+ input.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();if(gridEditing?.input===input){done=true;gridEditing=null;render();}}else if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();finish(e.key==='Enter'?'down':e.shiftKey?-1:1);}});
+ input.addEventListener('blur',()=>finish());
+}
+// Com uma célula aberta, o mousedown em outro botão não tira o foco: o clique fecha a edição e depois age.
+$('#grid').addEventListener('mousedown',e=>{if(gridEditing&&e.target.closest('button'))e.preventDefault();});
+$('#grid').addEventListener('click',async e=>{
+ const b=e.target.closest('button');if(!b)return;
+ const head=b.dataset.month,toggle=b.hasAttribute('data-toggle'),t=b.closest('td')?{...b.closest('td').dataset}:null;
+ if(gridEditing&&!await gridEditing.finish())return;
+ if(head){month=head;setView('all');setLayout('list');return;}
+ const td=t&&findCell(t.id,t.month);if(!td)return;if(toggle){const base=structuredClone(data.records[td.dataset.id+':'+td.dataset.month]||null);saveCell(td,togglePaid(base||blankRecord()),base);}else editCell(td);
+});
 function setView(v){view=v;$('#filter').value='all';document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render();}
 const field=(label,name,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra}></label>`;
 function showEditor(title,html,kind,id){editing={kind,id,month,base:id?structuredClone(kind==='company'?data.companies.find(c=>c.id===id):data.records[id+':'+month]||null):null};$('#editor-title').textContent=title;$('#form-fields').innerHTML=html;$('#form-error').textContent='';$('#editor').showModal();}

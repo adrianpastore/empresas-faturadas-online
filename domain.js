@@ -1,6 +1,23 @@
 export const monthKey=(d=new Date())=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 export function shiftMonth(key,n){const [y,m]=key.split('-').map(Number);return monthKey(new Date(y,m-1+n,1));}
 export const blankRecord=()=>({launch:'pending',amount:0,paid:false,receipt:'pending',boleto:false,due:'',note:'',invoice:'',paidDate:''});
+export function gridMonths(companies,records,today=new Date()){
+ const current=monthKey(today),end=shiftMonth(current,2);
+ const starts=companies.length?[...companies.map(c=>c.startMonth).filter(Boolean),...Object.entries(records).filter(([,r])=>r.launch!=='pending').map(([k])=>k.slice(k.lastIndexOf(':')+1))]:[];
+ const start=(starts.length?starts:[current]).sort()[0],months=[];for(let m=start;m<=end;m=shiftMonth(m,1))months.push(m);return months;
+}
+export function applyAmount(record,input,company,month){
+ const text=String(input).trim().replace(/\s|R\$/g,''),kept={note:record.note};
+ for(const k of ['attachments','lastContactAt','lastContactName'])if(Object.hasOwn(record,k))kept[k]=record[k];
+ if(!text||/^0+(,0{1,2})?$/.test(text))return {...blankRecord(),...kept,launch:text?'none':'pending'};
+ const amount=parseMoney(input);if(record.launch==='launched')return {...record,amount};
+ const [y,m]=month.split('-').map(Number),day=Math.min(company.dueDay,new Date(y,m,0).getDate());
+ return {...blankRecord(),...kept,launch:'launched',amount,due:`${month}-${String(day).padStart(2,'0')}`};
+}
+export function togglePaid(record,today=new Date()){
+ if(record.launch!=='launched')return {...record};
+ return {...record,paid:!record.paid,paidDate:record.paid?'':`${monthKey(today)}-${String(today.getDate()).padStart(2,'0')}`};
+}
 export const recordFor=(data,id,month)=>data.records[`${id}:${month}`]||blankRecord();
 export const money=n=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(n/100);
 export function parseMoney(value){const s=String(value).trim().replace(/\s|R\$/g,'');if(!/^\d+(?:\.\d{3})*(?:,\d{1,2})?$/.test(s))throw Error('Use um valor como 1.250,50.');const n=Math.round(Number(s.replaceAll('.','').replace(',','.'))*100);if(!Number.isSafeInteger(n)||n<=0)throw Error('Informe um valor maior que zero.');return n;}
