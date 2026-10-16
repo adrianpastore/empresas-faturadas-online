@@ -1,7 +1,8 @@
-import {monthKey,shiftMonth,blankRecord,recordFor,money,parseMoney,summary,validateData,onlyDigits,isValidCnpj,formatCnpj,boletoMessage,gridMonths,applyAmount,togglePaid} from './domain.js';
+import {monthKey,shiftMonth,blankRecord,recordFor,money,parseMoney,summary,validateData,onlyDigits,isValidCnpj,formatCnpj,boletoMessage,gridMonths,applyAmount,togglePaid,duplicateInvoice} from './domain.js';
 import {initialDemo,retireDemo,shouldShowDemo} from './demo.js';
 import * as cloud from './cloud.js';
-import {parseWorkbook} from './xlsx.js';import {planImport} from './importer.js';
+import {parseWorkbook} from './xlsx.js';import {planImport,nameKey} from './importer.js';
+import {readPdfItems,parseDanfe,invoiceMonth} from './danfe.js';
 const $=s=>document.querySelector(s), KEY='empresas-faturadas-v1';
 let layout='list';try{if(localStorage.getItem('layout')==='grid')layout='grid';}catch{}
 let data={version:1,hasRealData:false,companies:[],records:{}},month=monthKey(),view='all',editing=null,demo=false,ready=false,user=null,contactCompany=null,importing=null,session=0;
@@ -48,7 +49,7 @@ function render(){
   $('#demo-banner').hidden=!demo;
   if(demo)$('#demo-banner').innerHTML='Empresas e valores fictícios para conhecer o painel. Ao cadastrar sua primeira empresa real, todos os exemplos desaparecem definitivamente. <button class="quiet" id="begin-real">Cadastrar empresa real →</button>';
   $('#begin-real')?.addEventListener('click',()=>openCompany());
-  $('#new-company').disabled=!ready;$('#restore').disabled=!ready;$('#import-sheet').disabled=!ready;$('#backup').disabled=!ready||demo;
+  $('#insert-invoices').disabled=!ready;$('#new-company').disabled=!ready;$('#restore').disabled=!ready;$('#import-sheet').disabled=!ready;$('#backup').disabled=!ready||demo;
   renderGrid(query);
 }
 function setLayout(next){layout=next;try{localStorage.setItem('layout',layout);}catch{}render();}
@@ -121,6 +122,15 @@ function openRecord(id){
  const due=r.due||`${month}-${String(day).padStart(2,'0')}`;
  showEditor(c.name,`<p class="hint">Competência: ${esc(monthName(month))}</p><label>Situação das notas<select name="launch" id="launch-status"><option value="pending" ${r.launch==='pending'?'selected':''}>Pendente de lançamento</option><option value="launched" ${r.launch==='launched'?'selected':''}>Nota lançada</option><option value="none" ${r.launch==='none'?'selected':''}>Não teve compras</option></select></label><div id="launched-fields"><div class="form-grid">${field('Valor do mês (R$)','amount',r.amount?(r.amount/100).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}):'','text','inputmode="decimal" placeholder="0,00"')}${field('Vencimento','due',due,'date')}</div>${field('Número(s) da nota','invoice',r.invoice,'text','maxlength="200"')}<label class="checkbox-label"><input type="checkbox" name="paid" ${r.paid?'checked':''}>Pagamento confirmado</label>${field('Data do pagamento','paidDate',r.paidDate,'date')}<label>Comprovante<select name="receipt"><option value="pending">Pendente</option><option value="requested">Ficou de enviar / solicitado</option><option value="received">Recebido</option><option value="na">Não necessário</option></select></label>${c.method==='boleto'?`<label class="checkbox-label"><input type="checkbox" name="boleto" ${r.boleto?'checked':''}>Boleto já emitido</label><p class="hint">Este controle registra a emissão; o boleto é gerado no sistema do banco.</p><button type="button" class="quiet" id="copy-boleto">Copiar mensagem do boleto</button>`:''}</div><label>Observações<textarea name="note" rows="3" maxlength="3000" placeholder="Ex.: falei com o financeiro, enviará amanhã.">${esc(r.note)}</textarea></label>`,'record',id);
  $('#edit-form [name="receipt"]').value=r.receipt;
+ const notes=document.createElement('section');notes.id='month-invoices';
+ notes.innerHTML=`<button type="button" class="quiet" id="insert-record-invoice">Inserir nota (PDF)</button><h3>Notas deste mês</h3>${(r.notes||[]).map((n,i)=>`<div class="invoice-item"><span>Nota ${esc(n.number||'sem número')} · ${esc(n.issued)} · ${esc(money(n.amount))}</span><button type="button" class="quiet danger" data-remove-invoice="${i}">Remover</button></div>`).join('')||'<p class="hint">Nenhuma nota inserida por PDF.</p>'}`;
+ $('#form-fields').append(notes);
+ $('#insert-record-invoice').addEventListener('click',()=>chooseInvoices({id,month:editing.month}));
+ notes.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-remove-invoice]');if(!b)return;const current=session,m=editing.month,index=Number(b.dataset.removeInvoice),n=r.notes[index];
+  if(r.notes.length===1&&!confirm('Remover a última nota? O mês voltará para pendente.'))return;
+  try{requireReady();b.disabled=true;if(demo)throw Error('Insira uma nota em uma empresa real para continuar.');const next=await cloud.removeInvoice(id,m,index,n);if(session!==current)return;data.records[id+':'+m]=next;openRecord(id);toast('Nota removida.');}catch(e){if(session===current)$('#form-error').textContent=friendly(e);}finally{b.disabled=false;}
+ });
  function toggle(){const on=$('#launch-status').value==='launched';$('#launched-fields').hidden=!on;$('#edit-form [name="amount"]').required=on;}
  $('#launch-status').addEventListener('change',toggle);toggle();
  function toggleBoleto(){const button=$('#copy-boleto');if(button)button.hidden=$('#edit-form [name="boleto"]')?.checked;}
@@ -142,8 +152,9 @@ $('#edit-form').addEventListener('submit',async e=>{
    validateData(next);await cloud.saveEntity('company',c.id,c,editing.base,{month:editing.month});rememberReal();demo=false;data=retireDemo(data);const i=data.companies.findIndex(x=>x.id===c.id);if(i<0)data.companies.push(c);else data.companies[i]=c;
  }else{
    const launch=f.get('launch'),prior=recordFor(next,editing.id,editing.month);
+   if(launch!=='launched'&&prior.notes?.length)throw Error('Remova as notas deste mês antes de marcar como pendente ou sem compras.');
    if(launch!=='launched'&&prior.launch==='launched'&&!confirm('Isso removerá o valor, pagamento e controles deste mês. Continuar?'))return;
-   const r={...blankRecord(),launch,note:f.get('note').trim(),attachments:prior.attachments||[],lastContactAt:prior.lastContactAt||'',lastContactName:prior.lastContactName||''};
+   const r={...prior,...blankRecord(),launch,note:f.get('note').trim(),attachments:prior.attachments||[],lastContactAt:prior.lastContactAt||'',lastContactName:prior.lastContactName||''};
    if(launch==='launched'){r.amount=parseMoney(f.get('amount'));r.due=f.get('due');r.invoice=f.get('invoice').trim();r.paid=f.has('paid');r.paidDate=r.paid?(f.get('paidDate')||today()):'';r.receipt=f.get('receipt');r.boleto=f.has('boleto');}
    next.records[`${editing.id}:${editing.month}`]=r;validateData(next);
    if(!demo){await cloud.saveEntity('record',editing.id+':'+editing.month,r,editing.base,{companyId:editing.id,month:editing.month});data={...data,records:{...data.records,[editing.id+':'+editing.month]:r}};}
@@ -199,6 +210,72 @@ async function copyBoleto(c,r,fromEditor=false){
  try{await navigator.clipboard.writeText(text);if(session!==current)return;toast('Mensagem do boleto copiada. Cole no WhatsApp ou e-mail do financeiro.');}catch{if(session!==current)return;prompt('Copie a mensagem do boleto:',text);}
 }
 const copyRowBoleto=id=>copyBoleto(data.companies.find(c=>c.id===id),recordFor(data,id,month));
+let invoiceRows=null,invoiceSuggestion=null,invoiceReading=0,invoiceSaving=false;
+function chooseInvoices(suggestion=null){invoiceSuggestion=suggestion;$('#invoice-files').click();}
+$('#insert-invoices').addEventListener('click',()=>chooseInvoices());
+$('#invoice-files').addEventListener('change',async e=>{
+ const current=session,reading=++invoiceReading,suggestion=invoiceSuggestion,files=[...e.target.files];e.target.value='';invoiceSuggestion=null;
+ try{
+  requireReady();if(!files.length)return;if(files.length>10)throw Error('Insira até 10 PDFs por vez; divida os arquivos.');
+  const rows=[];
+  for(const file of files){
+   let parsed={key:'',number:'',issued:'',cnpj:'',legalName:'',total:0},error='';
+   try{if(file.type!=='application/pdf')throw Error('Envie um arquivo PDF.');parsed=parseDanfe(await readPdfItems(file));}catch(e){error=friendly(e);}
+   if(session!==current||reading!==invoiceReading)return;
+   const companies=demo?[]:data.companies,name=nameKey(parsed.legalName),matched=companies.find(c=>parsed.cnpj&&c.cnpj===parsed.cnpj)||companies.find(c=>name&&(nameKey(c.legalName||'')===name||nameKey(c.name)===name));
+   rows.push({file,parsed,error,company:matched?.id||(!demo&&suggestion?.id)||'new',month:suggestion?.month||invoiceMonth(parsed.issued),amount:parsed.total?(parsed.total/100).toFixed(2).replace('.',','):'',update:false,newId:crypto.randomUUID()});
+  }
+  invoiceRows=rows;renderInvoices();$('#invoice-review').showModal();
+ }catch(e){if(session===current)toast(friendly(e));}
+});
+function invoicePlan(){
+ const companies=demo?[]:data.companies,seen=[],newCompanies=new Map(),rows=[];
+ for(const row of invoiceRows||[]){
+  const p=row.parsed,isNew=row.company==='new';let company=companies.find(c=>c.id===row.company);
+  if(isNew){const identity=p.cnpj||nameKey(p.legalName)||row.newId;company=newCompanies.get(identity);if(!company){company={id:row.newId,name:p.legalName.slice(0,120),legalName:p.legalName.slice(0,160),cnpj:p.cnpj,method:'deposito',dueDay:10,contacts:[],startMonth:row.month};newCompanies.set(identity,company);}}
+  const prior=company?recordFor(data,company.id,row.month):blankRecord();let amount=0;try{amount=parseMoney(row.amount);}catch{}
+  const note={...p,amount},duplicate=!!(company&&(seen.some(x=>x.id===company.id&&(p.key||x.month===row.month)&&duplicateInvoice(x.note,note))||Object.entries(demo?{}:data.records).some(([k,r])=>(p.key?k.startsWith(company.id+':'):k===company.id+':'+row.month)&&(r.notes||[]).some(n=>duplicateInvoice(n,note)))));
+  const invalid=!company?.name.trim()||!/^\d{4}-(0[1-9]|1[0-2])$/.test(row.month)||!amount||!p.number.trim()||p.number.length>20||!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(p.issued)||(p.cnpj&&!isValidCnpj(p.cnpj))||p.legalName.length>160;
+  if(company)seen.push({id:company.id,month:row.month,note});
+  const different=!isNew&&company&&((p.cnpj&&company.cnpj&&p.cnpj!==company.cnpj)||(p.legalName&&company.legalName&&nameKey(p.legalName)!==nameKey(company.legalName)));
+  rows.push({row,company,prior,amount,duplicate,invalid,different,isNew});
+ }
+ return rows;
+}
+function renderInvoices(){
+ const plan=invoicePlan(),companies=demo?[]:data.companies;
+ $('#invoice-rows').innerHTML=plan.map((x,i)=>{
+  const {row,prior,duplicate,invalid,different,isNew,company}=x,p=row.parsed;
+  const group=plan.filter(y=>!y.duplicate&&!y.invalid&&y.company?.id===company?.id&&y.row.month===row.month),total=(prior.notes||[]).reduce((sum,n)=>sum+n.amount,0)+group.reduce((sum,y)=>sum+y.amount,0),count=(prior.notes||[]).length+group.length;
+  const manual=prior.launch==='launched'&&prior.amount!==total&&(!prior.notes?.length||prior.amount!==prior.notes.reduce((sum,n)=>sum+n.amount,0));
+  return `<article class="invoice-row${!duplicate&&invalid?' invalid':''}" data-invoice-row="${i}"><div class="invoice-heading"><strong>${esc(row.file.name)}</strong><button class="quiet danger" data-invoice-remove="${i}">Remover</button></div><label>Empresa<select data-invoice-company><option value="new" ${isNew?'selected':''}>Nova empresa</option>${companies.map(c=>`<option value="${esc(c.id)}" ${row.company===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label><div class="form-grid">${field('Razão social','legalName',p.legalName,'text','maxlength="160"')}${field('CNPJ do destinatário','cnpj',p.cnpj.length===14?formatCnpj(p.cnpj):p.cnpj,'text','inputmode="numeric"')}</div><div class="invoice-fields">${field('Número','number',p.number,'text','maxlength="20"')}${field('Emissão','issued',p.issued,'date')}<label>Competência<input type="month" data-invoice-month value="${esc(row.month)}"></label><label>Valor (R$)<input data-invoice-amount inputmode="decimal" value="${esc(row.amount)}"></label></div><p class="invoice-status${!duplicate&&invalid?' error':''}">${duplicate?'Já inserida':invalid?'Campos faltando':'Nova nota'}</p>${row.error?`<p class="error">${esc(row.error)}</p>`:''}${(p.warnings||[]).map(w=>`<p class="invoice-warning">${esc(w)}</p>`).join('')}${row.file.size>600*1024?'<p class="invoice-warning">PDF acima de 600 KB: os dados serão gravados sem anexar o arquivo.</p>':''}${!isNew&&company&&((!company.legalName&&p.legalName)||(!company.cnpj&&p.cnpj))?'<p class="invoice-warning">Razão social e CNPJ serão preenchidos</p>':''}${different?`<p class="invoice-warning">CNPJ ou razão social diferente do cadastro</p><label class="checkbox-label"><input type="checkbox" data-invoice-update ${row.update?'checked':''}>Atualizar cadastro</label>`:''}${!duplicate&&company?`<p class="invoice-warning">Valor do mês: ${esc(money(prior.amount))} → ${esc(money(total))} (soma de ${count===1?'1 nota':esc(count)+' notas'})${manual?' · O valor anterior foi digitado à mão e será substituído.':''}</p>`:''}</article>`;
+ }).join('');
+ $('#invoice-rows').querySelectorAll('input,select,button').forEach(b=>b.disabled=invoiceSaving);
+ for(const id of ['#close-invoices','#cancel-invoices'])$(id).disabled=invoiceSaving;
+ $('#confirm-invoices').disabled=invoiceSaving||!plan.some(x=>!x.duplicate)||plan.some(x=>!x.duplicate&&x.invalid);
+}
+$('#invoice-rows').addEventListener('change',e=>{
+ const article=e.target.closest('[data-invoice-row]');if(!article||invoiceSaving)return;const row=invoiceRows[Number(article.dataset.invoiceRow)],t=e.target;
+ if(t.hasAttribute('data-invoice-company')){row.company=t.value;row.update=false;}
+ else if(t.hasAttribute('data-invoice-month'))row.month=t.value;
+ else if(t.hasAttribute('data-invoice-amount'))row.amount=t.value;
+ else if(t.hasAttribute('data-invoice-update'))row.update=t.checked;
+ else if(t.name==='cnpj')row.parsed.cnpj=onlyDigits(t.value);
+ else if(['number','issued','legalName'].includes(t.name))row.parsed[t.name]=t.value.trim();
+ renderInvoices();
+});
+$('#invoice-rows').addEventListener('click',e=>{const b=e.target.closest('[data-invoice-remove]');if(!b||invoiceSaving)return;invoiceRows.splice(Number(b.dataset.invoiceRemove),1);renderInvoices();});
+$('#confirm-invoices').addEventListener('click',async()=>{
+ const current=session,review=invoiceRows;try{
+  requireReady();if(invoiceSaving||!invoiceRows)return;const plan=invoicePlan();if(plan.some(x=>!x.duplicate&&x.invalid))return;
+  const items=plan.filter(x=>!x.duplicate).map(x=>({company:{...x.company,legalName:x.row.parsed.legalName,cnpj:x.row.parsed.cnpj},isNew:x.isNew,updateCompany:x.row.update,month:x.row.month,note:{key:x.row.parsed.key,number:x.row.parsed.number,issued:x.row.parsed.issued,amount:x.amount,attachmentId:''},file:x.row.file.size<=600*1024?x.row.file:null}));
+  if(!items.length)return;invoiceSaving=true;renderInvoices();await cloud.addInvoices(items);if(session!==current||invoiceRows!==review)return;
+  rememberReal();if(demo){demo=false;data=retireDemo(data);}for(const {company,month:m,updateCompany}of items){const i=data.companies.findIndex(c=>c.id===company.id),prior=data.companies[i];let c={...(prior||company),startMonth:[prior?.startMonth||m,m].sort()[0]};for(const k of ['cnpj','legalName'])if((!c[k]||updateCompany)&&company[k])c[k]=company[k];if(i<0)data.companies.push(c);else data.companies[i]=c;}$('#invoice-review').close();$('#editor').close();render();toast('Notas inseridas e sincronizadas.');
+ }catch(e){if(session===current&&invoiceRows===review){$('#invoice-error').textContent=friendly(e);toast(friendly(e));}}finally{if(session===current&&invoiceRows===review){invoiceSaving=false;if(invoiceRows)renderInvoices();}}
+});
+$('#invoice-review').addEventListener('cancel',e=>{if(invoiceSaving)e.preventDefault();});
+$('#invoice-review').addEventListener('close',()=>{invoiceRows=null;invoiceSuggestion=null;invoiceReading++;invoiceSaving=false;for(const id of ['#close-invoices','#cancel-invoices'])$(id).disabled=false;$('#invoice-rows').innerHTML='';$('#invoice-error').textContent='';});
+for(const id of ['#close-invoices','#cancel-invoices'])$(id).addEventListener('click',()=>{if(!invoiceSaving)$('#invoice-review').close();});
 $('#import-sheet').addEventListener('click',()=>$('#import-file').click());
 $('#import-file').addEventListener('change',async e=>{const currentSession=session;try{requireReady();const file=e.target.files[0];if(!file)return;if(file.size>5*1024*1024)throw Error('Planilha maior que 5 MB.');const bytes=new Uint8Array(await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsArrayBuffer(file);}));if(session!==currentSession)return;const workbook=await parseWorkbook(bytes);if(session!==currentSession)return;importing=planImport(workbook,demo?retireDemo(data):data);showImport(importing);}catch(err){toast('Não foi possível ler a planilha: '+friendly(err));}finally{e.target.value='';}});
 function showImport(p){

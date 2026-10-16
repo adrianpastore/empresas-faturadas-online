@@ -8,8 +8,8 @@ export function gridMonths(companies,records,today=new Date()){
 }
 export function applyAmount(record,input,company,month){
  const text=String(input).trim().replace(/\s|R\$/g,''),kept={note:record.note};
- for(const k of ['attachments','lastContactAt','lastContactName'])if(Object.hasOwn(record,k))kept[k]=record[k];
- if(!text||/^0+(,0{1,2})?$/.test(text))return {...blankRecord(),...kept,launch:text?'none':'pending'};
+ for(const k of ['notes','attachments','lastContactAt','lastContactName'])if(Object.hasOwn(record,k))kept[k]=record[k];
+ if(!text||/^0+(,0{1,2})?$/.test(text)){if(record.notes?.length)throw Error('Remova as notas deste mês antes de marcar como pendente ou sem compras.');return {...blankRecord(),...kept,launch:text?'none':'pending'};}
  const amount=parseMoney(input);if(record.launch==='launched')return {...record,amount};
  const [y,m]=month.split('-').map(Number),day=Math.min(company.dueDay,new Date(y,m,0).getDate());
  return {...blankRecord(),...kept,launch:'launched',amount,due:`${month}-${String(day).padStart(2,'0')}`};
@@ -19,6 +19,24 @@ export function togglePaid(record,today=new Date()){
  return {...record,paid:!record.paid,paidDate:record.paid?'':`${monthKey(today)}-${String(today.getDate()).padStart(2,'0')}`};
 }
 export const recordFor=(data,id,month)=>data.records[`${id}:${month}`]||blankRecord();
+function validateNotes(notes){
+ if(!Array.isArray(notes)||notes.length>30||new Set(notes.map(n=>n?.key).filter(Boolean)).size!==notes.filter(n=>n?.key).length||notes.some(n=>!n||typeof n.key!=='string'||! /^(\d{44})?$/.test(n.key)||typeof n.number!=='string'||n.number.length>20||typeof n.issued!=='string'||! /^(\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]))?$/.test(n.issued)||!Number.isSafeInteger(n.amount)||n.amount<=0||typeof n.attachmentId!=='string'))throw Error('Notas inválidas: use até 30 notas por mês.');
+}
+export const duplicateInvoice=(a,b)=>!b.key?a.number===b.number&&a.amount===b.amount&&(!a.issued||!b.issued||a.issued===b.issued):a.key===b.key;
+const invoiceTotals=notes=>({notes,amount:notes.reduce((sum,n)=>sum+n.amount,0),invoice:notes.map(n=>n.number).filter(Boolean).join(', ').slice(0,200)});
+export function withInvoice(record,note,company,month){
+ const notes=[...(record.notes||[]),{...note}];validateNotes(notes);
+ const [y,m]=month.split('-').map(Number),day=Math.min(company.dueDay,new Date(y,m,0).getDate());
+ return {...record,...invoiceTotals(notes),launch:'launched',due:record.due||`${month}-${String(day).padStart(2,'0')}`};
+}
+export function withoutInvoice(record,index){
+ if(!record.notes?.[index])return {...record};
+ const removed=record.notes[index],notes=record.notes.filter((_,i)=>i!==index),next={...record,...invoiceTotals(notes)};
+ if(removed.attachmentId)next.attachments=(record.attachments||[]).filter(a=>a.id!==removed.attachmentId);
+ if(notes.length)return next;
+ const kept={notes:[],note:record.note};for(const k of ['attachments','lastContactAt','lastContactName'])if(Object.hasOwn(next,k))kept[k]=next[k];
+ return {...blankRecord(),...kept};
+}
 export const money=n=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(n/100);
 export function parseMoney(value){const s=String(value).trim().replace(/\s|R\$/g,'');if(!/^\d+(?:\.\d{3})*(?:,\d{1,2})?$/.test(s))throw Error('Use um valor como 1.250,50.');const n=Math.round(Number(s.replaceAll('.','').replace(',','.'))*100);if(!Number.isSafeInteger(n)||n<=0)throw Error('Informe um valor maior que zero.');return n;}
 export const onlyDigits=v=>String(v??'').replace(/\D/g,'');
@@ -37,6 +55,7 @@ export function validateData(d){
   for(const [key,r] of Object.entries(d.records)){
     const i=key.lastIndexOf(':');if(!ids.has(key.slice(0,i))||!/^\d{4}-(0[1-9]|1[0-2])$/.test(key.slice(i+1))||!r||!['pending','launched','none'].includes(r.launch)||!Number.isSafeInteger(r.amount)||r.amount<0||typeof r.paid!=='boolean'||typeof r.boleto!=='boolean'||!['pending','requested','received','na'].includes(r.receipt)||!['due','note','invoice','paidDate'].every(x=>typeof r[x]==='string')||(r.launch!=='launched'&&(r.amount!==0||r.paid||r.boleto))||(r.launch==='launched'&&r.amount<=0))throw Error('Lançamento inválido no backup.');
     if(r.attachments!==undefined&&(!Array.isArray(r.attachments)||r.attachments.length>10||r.attachments.some(a=>!a||typeof a.id!=='string'||! /^[A-Za-z0-9_-]{1,100}$/.test(a.id)||typeof a.name!=='string'||!['application/pdf','image/jpeg','image/png','image/webp'].includes(a.mime)||!Number.isInteger(a.size)||a.size<1||a.size>614400)))throw Error('Anexos inválidos no backup.');
+    if(r.notes!==undefined)validateNotes(r.notes);
   }
   return d;
 }
